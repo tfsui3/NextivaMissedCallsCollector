@@ -285,7 +285,10 @@ class NextivaCollector {
             this.viewerUpdateInterval = null;
         }
         if (!skipDownload) {
-            this.downloadAndClearData();
+            // Only clear data, do not auto-download (download is handled in viewer)
+            this.clearLocalStorage();
+            this.realTimeCount = 0;
+            this.updateRealTimeCounter();
         }
         this.log && this.log('Real-time mode stopped');
     }
@@ -295,47 +298,42 @@ class NextivaCollector {
 
         const targetNode = document.body;
 
+        // Use MutationObserver to listen for childList, characterData, and subtree changes
         this.realTimeObserver = new MutationObserver(async (mutations) => {
             let shouldCheck = false;
-
             for (const mutation of mutations) {
-                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                    for (const node of mutation.addedNodes) {
-                        if (node.nodeType === Node.ELEMENT_NODE) {
-                            const hasCommRecord = node.querySelector && (
-                                node.querySelector('[data-testid="CommunicationsUI-Compact-View-Message-queue-card"]') ||
-                                node.matches('[data-testid="CommunicationsUI-Compact-View-Message-queue-card"]') ||
-                                (node.textContent && node.textContent.toLowerCase().includes('missed call'))
-                            );
-
-                            if (hasCommRecord) {
-                                shouldCheck = true;
-                                this.log && this.log('DOM mutation: New communication record detected');
-                                break;
-                            }
-                        }
-                    }
-                    if (shouldCheck) break;
+                // Listen for childList (add/remove), characterData (text changes), and subtree
+                if (
+                    (mutation.type === 'childList' && mutation.addedNodes.length > 0) ||
+                    mutation.type === 'characterData'
+                ) {
+                    shouldCheck = true;
+                    break;
                 }
             }
-
             if (shouldCheck) {
-                this.log && this.log('Mutation triggered check for new missed calls');
                 await this.checkForNewMissedCalls();
             }
         });
-
         this.realTimeObserver.observe(targetNode, {
             childList: true,
+            characterData: true,
             subtree: true
         });
 
-        this.realTimeInterval = setInterval(async () => {
-            this.log && this.log('=== Periodic check running ===');
-            const newCalls = await this.checkForNewMissedCalls();
-            if (newCalls > 0) {
-                this.log && this.log(`Periodic check found ${newCalls} new calls!`);
+        // Fallback: forced check if top record changes (every 2s)
+        this._topRecordCheckInterval && clearInterval(this._topRecordCheckInterval);
+        this._topRecordCheckInterval = setInterval(async () => {
+            const currentTop = this.getCurrentTopRecord();
+            if (currentTop && this.hasTopRecordChanged(currentTop)) {
+                this.lastTopRecord = currentTop;
+                await this.checkForNewMissedCalls();
             }
+        }, 2000);
+
+        // Still keep the periodic check (every 3s)
+        this.realTimeInterval = setInterval(async () => {
+            await this.checkForNewMissedCalls();
         }, 3000);
 
         this.viewerUpdateInterval = setInterval(() => {
