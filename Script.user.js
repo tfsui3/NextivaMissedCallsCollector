@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nextiva Missed Call Collector
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  Collect missed call records from Nextiva with real-time monitoring
 // @match        https://kwickpos.nextos.com/apps/nextiva-connect*
 // @grant        none
@@ -31,7 +31,7 @@ class NextivaCollector {
         this.realTimeCount = 0;
         this.viewerWindow = null;
         this.viewerUpdateInterval = null;
-        this.currentViewerTab = 'all'; // 新增：当前选中的tab
+        this.currentViewerTab = 'all';
         this.loadFromLocalStorage();
     }
 
@@ -101,7 +101,7 @@ class NextivaCollector {
         }
     }
 
-    parseDateTime(text) {
+    parseDateTime(text, lowerRowDates = []) {
         const now = new Date();
         let date = new Date();
 
@@ -110,30 +110,33 @@ class NextivaCollector {
             let hours = parseInt(timeOnlyMatch[1]);
             const minutes = parseInt(timeOnlyMatch[2]);
             const period = timeOnlyMatch[3]?.toUpperCase();
-
             if (period === 'PM' && hours !== 12) hours += 12;
             if (period === 'AM' && hours === 12) hours = 0;
-
             date.setHours(hours, minutes, 0, 0);
             return date;
         }
 
         const yesterdayMatch = text.match(/Yesterday\s*(\d{1,2}):(\d{2})(?:\s*([AP]M))?/i);
         if (yesterdayMatch) {
-            date.setDate(date.getDate() - 1);
-
             let hours = parseInt(yesterdayMatch[1]);
             const minutes = parseInt(yesterdayMatch[2]);
             const period = yesterdayMatch[3]?.toUpperCase();
-
             if (period === 'PM' && hours !== 12) hours += 12;
             if (period === 'AM' && hours === 12) hours = 0;
-
+            date.setDate(date.getDate() - 1);
             date.setHours(hours, minutes, 0, 0);
+
+            if (lowerRowDates && lowerRowDates.some(d => d && d.getDate() === now.getDate() && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear())) {
+                date = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0, 0);
+            }
             return date;
         }
 
-        this.log('Date text does not match expected patterns:', text);
+        const parsed = Date.parse(text);
+        if (!isNaN(parsed)) {
+            return new Date(parsed);
+        }
+
         return null;
     }
 
@@ -152,6 +155,18 @@ class NextivaCollector {
     async collectCurrentPageMissedCalls() {
         const rows = document.querySelectorAll('[data-testid="CommunicationsUI-Compact-View-Message-queue-card"]');
         let collectedCount = 0;
+        const lowerRowDates = [];
+
+        // First pass: collect all timestamps for Yesterday logic
+        for (const row of rows) {
+            const timestampElement = row.querySelector('[data-testid="CommunicationsUI-Compact-View-timestamp"]');
+            if (timestampElement) {
+                const timestamp = this.parseDateTime(timestampElement.textContent);
+                if (timestamp) {
+                    lowerRowDates.push(timestamp);
+                }
+            }
+        }
 
         this.log(`Collecting current page missed calls from ${rows.length} rows`);
 
@@ -161,17 +176,7 @@ class NextivaCollector {
 
             const dataIndex = parentElement.getAttribute('data-index');
 
-            if (this.processedIndexes.has(dataIndex)) continue;
-
             if (!row.textContent.includes('Missed call')) {
-                this.processedIndexes.add(dataIndex);
-                continue;
-            }
-
-            const teammateElement = row.querySelector('.teammate, [class*="teammate"]');
-            if (teammateElement) {
-                this.log('Skipping teammate record');
-                this.processedIndexes.add(dataIndex);
                 continue;
             }
 
@@ -179,7 +184,6 @@ class NextivaCollector {
             const contactElement = row.querySelector('[data-testid="CommunicationsUI-Compact-View-sender"]');
 
             if (!timestampElement || !contactElement) {
-                this.processedIndexes.add(dataIndex);
                 continue;
             }
 
@@ -190,22 +194,28 @@ class NextivaCollector {
                 contact = `(${phoneMatch[1]})${phoneMatch[2]}-${phoneMatch[3]}`;
             }
 
-            const timestamp = this.parseDateTime(timestampElement.textContent);
+            const timestamp = this.parseDateTime(timestampElement.textContent, lowerRowDates);
             if (!timestamp) {
-                this.processedIndexes.add(dataIndex);
                 continue;
             }
 
-            const record = new CallRecord(timestamp, contact, dataIndex);
-            this.allRecords.push(record);
-            this.processedIndexes.add(dataIndex);
-            collectedCount++;
+            // Check if this record already exists based on contact + datetime
+            const exists = this.allRecords.some(record =>
+                record.contact === contact &&
+                record.timestamp.getTime() === timestamp.getTime()
+            );
 
-            this.log('Collected existing missed call:', {
-                contact: record.contact,
-                timestamp: record.timestamp.toLocaleString(),
-                dataIndex: record.dataIndex
-            });
+            if (!exists) {
+                const record = new CallRecord(timestamp, contact, dataIndex);
+                this.allRecords.push(record);
+                collectedCount++;
+
+                this.log('Collected existing missed call:', {
+                    contact: record.contact,
+                    timestamp: record.timestamp.toLocaleString(),
+                    dataIndex: record.dataIndex
+                });
+            }
         }
 
         this.realTimeCount = this.allRecords.length;
@@ -217,10 +227,14 @@ class NextivaCollector {
 
     startRealTimeMode() {
         if (this.isRealTimeMode) {
-            this.stopRealTimeMode(true); // true: do not download/clear data
+            this.stopRealTimeMode(true);
         }
         this.isRealTimeMode = true;
         this.isCollecting = false;
+
+        // Clear all records to start fresh
+        this.allRecords = [];
+        this.processedIndexes.clear();
 
         this.collectCurrentPageMissedCalls().then(() => {
             this.updateRealTimeCounter();
@@ -284,8 +298,11 @@ class NextivaCollector {
             clearInterval(this.viewerUpdateInterval);
             this.viewerUpdateInterval = null;
         }
+        if (this._topRecordCheckInterval) {
+            clearInterval(this._topRecordCheckInterval);
+            this._topRecordCheckInterval = null;
+        }
         if (!skipDownload) {
-            // Only clear data, do not auto-download (download is handled in viewer)
             this.clearLocalStorage();
             this.realTimeCount = 0;
             this.updateRealTimeCounter();
@@ -298,14 +315,13 @@ class NextivaCollector {
 
         const targetNode = document.body;
 
-        // Use MutationObserver to listen for childList, characterData, and subtree changes
         this.realTimeObserver = new MutationObserver(async (mutations) => {
             let shouldCheck = false;
             for (const mutation of mutations) {
-                // Listen for childList (add/remove), characterData (text changes), and subtree
                 if (
                     (mutation.type === 'childList' && mutation.addedNodes.length > 0) ||
-                    mutation.type === 'characterData'
+                    mutation.type === 'characterData' ||
+                    mutation.type === 'attributes'
                 ) {
                     shouldCheck = true;
                     break;
@@ -315,32 +331,34 @@ class NextivaCollector {
                 await this.checkForNewMissedCalls();
             }
         });
+
         this.realTimeObserver.observe(targetNode, {
             childList: true,
             characterData: true,
-            subtree: true
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['data-index']
         });
 
-        // Fallback: forced check if top record changes (every 2s)
         this._topRecordCheckInterval && clearInterval(this._topRecordCheckInterval);
         this._topRecordCheckInterval = setInterval(async () => {
             const currentTop = this.getCurrentTopRecord();
             if (currentTop && this.hasTopRecordChanged(currentTop)) {
-                this.lastTopRecord = currentTop;
                 await this.checkForNewMissedCalls();
+                this.lastTopRecord = this.getCurrentTopRecord();
             }
-        }, 2000);
+        }, 1000);
 
-        // Still keep the periodic check (every 3s)
         this.realTimeInterval = setInterval(async () => {
             await this.checkForNewMissedCalls();
-        }, 3000);
+            this.lastTopRecord = this.getCurrentTopRecord();
+        }, 2000);
 
         this.viewerUpdateInterval = setInterval(() => {
             if (this.viewerWindow && this.viewerWindow.style.display !== 'none') {
                 this.updateViewerContent();
             }
-        }, 2000);
+        }, 1000);
     }
 
     getCurrentTopRecord() {
@@ -363,7 +381,6 @@ class NextivaCollector {
             content: topRow.textContent.trim()
         };
 
-        this.log && this.log('Current top record:', result);
         return result;
     }
 
@@ -379,26 +396,28 @@ class NextivaCollector {
 
     async checkForNewMissedCalls() {
         const rows = document.querySelectorAll('[data-testid="CommunicationsUI-Compact-View-Message-queue-card"]');
-        const topRows = Array.from(rows).slice(0, 5);
         let newFound = 0;
+        const lowerRowDates = [];
 
-        for (const row of topRows) {
+        // First pass: collect all timestamps for Yesterday logic
+        for (const row of rows) {
+            const timestampElement = row.querySelector('[data-testid="CommunicationsUI-Compact-View-timestamp"]');
+            if (timestampElement) {
+                const timestamp = this.parseDateTime(timestampElement.textContent);
+                if (timestamp) {
+                    lowerRowDates.push(timestamp);
+                }
+            }
+        }
+
+        // Check ALL rows every time
+        for (const row of rows) {
             const parentElement = row.closest('[data-index]');
             if (!parentElement) continue;
 
             const dataIndex = parentElement.getAttribute('data-index');
 
-            if (this.processedIndexes.has(dataIndex)) continue;
-
             if (!row.textContent.includes('Missed call')) {
-                this.processedIndexes.add(dataIndex);
-                continue;
-            }
-
-            const teammateElement = row.querySelector('.teammate, [class*="teammate"]');
-            if (teammateElement) {
-                this.log && this.log('Skipping teammate record');
-                this.processedIndexes.add(dataIndex);
                 continue;
             }
 
@@ -406,7 +425,6 @@ class NextivaCollector {
             const contactElement = row.querySelector('[data-testid="CommunicationsUI-Compact-View-sender"]');
 
             if (!timestampElement || !contactElement) {
-                this.processedIndexes.add(dataIndex);
                 continue;
             }
 
@@ -417,28 +435,37 @@ class NextivaCollector {
                 contact = `(${phoneMatch[1]})${phoneMatch[2]}-${phoneMatch[3]}`;
             }
 
-            const timestamp = this.parseDateTime(timestampElement.textContent);
+            const timestamp = this.parseDateTime(timestampElement.textContent, lowerRowDates);
             if (!timestamp) {
-                this.processedIndexes.add(dataIndex);
                 continue;
             }
 
-            const record = new CallRecord(timestamp, contact, dataIndex);
-            this.allRecords.push(record);
-            this.processedIndexes.add(dataIndex);
-            this.realTimeCount++;
-            newFound++;
-            this.updateRealTimeCounter();
-            this.saveToLocalStorage();
-            if (this.viewerWindow && this.viewerWindow.style.display !== 'none') {
-                this.updateViewerContent();
+            // Check if this record already exists based on contact + datetime
+            const exists = this.allRecords.some(record =>
+                record.contact === contact &&
+                record.timestamp.getTime() === timestamp.getTime()
+            );
+
+            if (!exists) {
+                const record = new CallRecord(timestamp, contact, dataIndex);
+                this.allRecords.push(record);
+                this.realTimeCount = this.allRecords.length;
+                newFound++;
+
+                this.log('New missed call detected:', {
+                    contact: record.contact,
+                    timestamp: record.timestamp.toLocaleString(),
+                    dataIndex: record.dataIndex
+                });
             }
-            this.log && this.log('New missed call detected:', {
-                contact: record.contact,
-                timestamp: record.timestamp.toLocaleString(),
-                dataIndex: record.dataIndex
-            });
         }
+
+        if (newFound > 0) {
+            this.saveToLocalStorage();
+            this.updateRealTimeCounter();
+            this.notifyViewerUpdate();
+        }
+
         return newFound;
     }
 
@@ -580,7 +607,7 @@ class NextivaCollector {
         downloadBtn.onmouseover = () => downloadBtn.style.backgroundColor = '#2980b9';
         downloadBtn.onmouseout = () => downloadBtn.style.backgroundColor = '#3498db';
         downloadBtn.onclick = (e) => {
-            e.stopPropagation(); // 防止触发拖拽
+            e.stopPropagation();
             this.downloadViewerData();
         };
 
@@ -601,7 +628,6 @@ class NextivaCollector {
         header.appendChild(titleSection);
         header.appendChild(closeBtn);
 
-        // 新增：添加tabs导航
         const tabsNav = document.createElement('div');
         tabsNav.style.cssText = `
             background: #f8f9fa;
@@ -620,7 +646,7 @@ class NextivaCollector {
         tabs.forEach((tab, tabIndex) => {
             const tabButton = document.createElement('button');
             tabButton.textContent = tab.label;
-            tabButton.setAttribute('data-tab-id', tab.id); // 添加数据属性便于识别
+            tabButton.setAttribute('data-tab-id', tab.id);
 
             const isActive = this.currentViewerTab === tab.id;
             tabButton.style.cssText = `
@@ -648,7 +674,6 @@ class NextivaCollector {
             };
 
             tabButton.onclick = () => {
-                console.log(`Switching to tab: ${tab.id}`); // 调试日志
                 this.currentViewerTab = tab.id;
                 this.updateViewerContent();
             };
@@ -736,7 +761,6 @@ class NextivaCollector {
         });
     }
 
-    // 新增：根据当前tab过滤数据
     getFilteredReport() {
         const fullReport = this.generateReport();
 
@@ -751,7 +775,6 @@ class NextivaCollector {
         }
     }
 
-    // 新增：更新tab按钮样式
     updateTabButtons() {
         if (!this.viewerWindow) return;
 
@@ -761,14 +784,12 @@ class NextivaCollector {
             { id: 'pending', label: 'Pending', color: '#dc3545' }
         ];
 
-        // 通过data-tab-id属性查找按钮
         tabs.forEach(tab => {
             const button = this.viewerWindow.querySelector(`button[data-tab-id="${tab.id}"]`);
             if (!button) return;
 
             const isActive = this.currentViewerTab === tab.id;
 
-            // 重新设置按钮样式
             button.style.cssText = `
                 flex: 1;
                 padding: 8px 12px;
@@ -781,7 +802,6 @@ class NextivaCollector {
                 border-bottom: 2px solid ${isActive ? tab.color : 'transparent'};
             `;
 
-            // 重新绑定悬停事件
             button.onmouseover = () => {
                 if (this.currentViewerTab !== tab.id) {
                     button.style.backgroundColor = '#e9ecef';
@@ -800,12 +820,10 @@ class NextivaCollector {
         const content = document.getElementById('viewer-content');
         if (!content) return;
 
-        // 更新tab按钮样式
         this.updateTabButtons();
 
-        // 获取过滤后的数据
         const report = this.getFilteredReport();
-        const fullReport = this.generateReport(); // 用于统计
+        const fullReport = this.generateReport();
 
         if (report.length === 0) {
             let emptyMessage = '';
@@ -823,7 +841,6 @@ class NextivaCollector {
             return;
         }
 
-        // 添加统计信息
         const statsDiv = document.createElement('div');
         const totalCalls = fullReport.length;
         const calledBackCount = fullReport.filter(r => r.calledBack).length;
@@ -844,7 +861,6 @@ class NextivaCollector {
         statsHtml += `<strong style="color: #28a745;">Called Back:</strong> ${calledBackCount} | `;
         statsHtml += `<strong style="color: #dc3545;">Pending:</strong> ${pendingCount}`;
 
-        // 如果不是显示全部，则显示当前过滤的数量
         if (this.currentViewerTab !== 'all') {
             statsHtml += ` | <strong>Showing:</strong> ${currentCount}`;
         }
@@ -871,20 +887,17 @@ class NextivaCollector {
         const tbody = document.createElement('tbody');
 
         report.forEach((row, index) => {
-            // 需要找到原始报告中的索引，以便正确处理checkbox回调
             const originalIndex = fullReport.findIndex(fullRow =>
                 fullRow.datetime === row.datetime && fullRow.contact === row.contact
             );
 
             const tr = document.createElement('tr');
 
-            // 修改：保持已回电的划线效果，但不改变在不同tab下的显示
             const rowStyle = row.calledBack ?
                 'opacity: 0.5; text-decoration: line-through;' : '';
 
             tr.style.cssText = rowStyle + ' transition: background-color 0.2s;';
 
-            // 添加悬停效果
             tr.onmouseover = () => {
                 if (!row.calledBack) {
                     tr.style.backgroundColor = '#f9f9f9';
@@ -915,14 +928,12 @@ class NextivaCollector {
         content.appendChild(table);
     }
 
-    // 新增：从viewer下载数据（不清空缓存）
     async downloadViewerData() {
         if (this.allRecords.length === 0) {
             alert('No missed call records to download.');
             return;
         }
 
-        // 获取当前tab的过滤数据
         const report = this.getFilteredReport();
 
         if (report.length === 0) {
@@ -949,7 +960,6 @@ class NextivaCollector {
         const dateStr = `${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}`;
         const timeStr = `${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}`;
 
-        // 根据当前tab添加文件名后缀
         let tabSuffix = '';
         switch (this.currentViewerTab) {
             case 'called_back':
@@ -993,7 +1003,6 @@ class NextivaCollector {
                 this.saveToLocalStorage();
                 this.updateRealTimeCounter();
 
-                // 更新当前行样式
                 const currentRow = event.target.closest('tr');
                 if (currentRow) {
                     if (checked) {
@@ -1003,7 +1012,6 @@ class NextivaCollector {
                     }
                 }
 
-                // 重新更新整个viewer内容以反映统计变化和可能的过滤变化
                 setTimeout(() => {
                     this.updateViewerContent();
                 }, 100);
@@ -1011,7 +1019,6 @@ class NextivaCollector {
         }
     }
 
-    // Legacy methods for one-time collection
     async collectRecords() {
         const rows = document.querySelectorAll('[data-testid="CommunicationsUI-Compact-View-Message-queue-card"]');
         this.lastKnownRowCount = rows.length;
@@ -1039,6 +1046,17 @@ class NextivaCollector {
             this.log('Missing indexes detected:', missingIndexes);
         }
 
+        const lowerRowDates = [];
+        for (const row of rows) {
+            const timestampElement = row.querySelector('[data-testid="CommunicationsUI-Compact-View-timestamp"]');
+            if (timestampElement) {
+                const timestamp = this.parseDateTime(timestampElement.textContent);
+                if (timestamp) {
+                    lowerRowDates.push(timestamp);
+                }
+            }
+        }
+
         for (const row of rows) {
             const parentElement = row.closest('[data-index]');
             if (!parentElement) {
@@ -1056,13 +1074,6 @@ class NextivaCollector {
             }
 
             if (!row.textContent.includes('Missed call')) {
-                this.processedIndexes.add(dataIndex);
-                continue;
-            }
-
-            const teammateElement = row.querySelector('.teammate, [class*="teammate"]');
-            if (teammateElement) {
-                this.log('Skipping teammate record:', row.querySelector('[data-testid="CommunicationsUI-Compact-View-sender"]')?.textContent.trim());
                 this.processedIndexes.add(dataIndex);
                 continue;
             }
@@ -1086,7 +1097,7 @@ class NextivaCollector {
                 contact = `(${phoneMatch[1]})${phoneMatch[2]}-${phoneMatch[3]}`;
             }
 
-            const timestamp = this.parseDateTime(timestampElement.textContent);
+            const timestamp = this.parseDateTime(timestampElement.textContent, lowerRowDates);
             if (!timestamp) continue;
 
             this.allRecords.push(new CallRecord(timestamp, contact, dataIndex));
@@ -1310,7 +1321,6 @@ Collected ${this.allRecords.length} missed call records`;
 
     addButtons() {
         try {
-            // One-time collection button
             const collectButton = document.createElement('button');
             collectButton.textContent = 'Collect Missed Calls';
             collectButton.style.cssText = `
@@ -1330,7 +1340,6 @@ Collected ${this.allRecords.length} missed call records`;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             `;
 
-            // Real-time monitoring button
             const realtimeButton = document.createElement('button');
             realtimeButton.textContent = 'Real-time Monitor';
             realtimeButton.style.cssText = `
@@ -1350,7 +1359,6 @@ Collected ${this.allRecords.length} missed call records`;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             `;
 
-            // Counter display
             const counter = document.createElement('span');
             counter.id = 'missed-call-counter';
             counter.style.cssText = `
@@ -1366,7 +1374,6 @@ Collected ${this.allRecords.length} missed call records`;
             `;
             counter.textContent = `Missed calls: ${this.getUncalledBackCount()}`;
 
-            // View button
             const viewButton = document.createElement('button');
             viewButton.textContent = 'View';
             viewButton.style.cssText = `
@@ -1385,7 +1392,6 @@ Collected ${this.allRecords.length} missed call records`;
                 display: none;
             `;
 
-            // Button hover effects
             realtimeButton.onmouseover = () => {
                 if (!this.isRealTimeMode) {
                     realtimeButton.style.backgroundColor = '#229954';
@@ -1404,7 +1410,6 @@ Collected ${this.allRecords.length} missed call records`;
                 collectButton.style.backgroundColor = '#3498db';
             };
 
-            // Button click handlers
             realtimeButton.onclick = () => {
                 if (this.isRealTimeMode) {
                     this.stopRealTimeMode();
@@ -1428,12 +1433,11 @@ Collected ${this.allRecords.length} missed call records`;
                 }
             };
 
-            // 添加双击强制刷新功能
             realtimeButton.ondblclick = () => {
                 if (this.isRealTimeMode) {
                     this.log('Double-click detected: Force refresh check');
-                    this.processedIndexes.clear(); // 清空已处理索引
-                    this.checkForNewMissedCalls(); // 强制检查
+                    this.processedIndexes.clear();
+                    this.checkForNewMissedCalls();
                 }
             };
 
@@ -1465,7 +1469,6 @@ Collected ${this.allRecords.length} missed call records`;
                 this.showViewer();
             };
 
-            // Add CSS animation for pulse effect
             const style = document.createElement('style');
             style.textContent = `
                 @keyframes pulse {
@@ -1482,13 +1485,11 @@ Collected ${this.allRecords.length} missed call records`;
             `;
             document.head.appendChild(style);
 
-            // Add buttons to page
             document.body.appendChild(realtimeButton);
             document.body.appendChild(collectButton);
             document.body.appendChild(counter);
             document.body.appendChild(viewButton);
 
-            // Show counter and view button if there are existing records
             if (this.allRecords.length > 0) {
                 counter.style.display = 'block';
                 viewButton.style.display = 'block';
@@ -1503,7 +1504,6 @@ Collected ${this.allRecords.length} missed call records`;
     }
 }
 
-// Make collector globally accessible for checkbox callbacks
 window.nextiva_collector = null;
 
 (function() {
@@ -1514,7 +1514,6 @@ window.nextiva_collector = null;
         const collector = new NextivaCollector();
         window.nextiva_collector = collector;
 
-        // Add buttons when page loads
         if (document.readyState === 'loading') {
             window.addEventListener('load', () => {
                 setTimeout(() => {
@@ -1523,7 +1522,6 @@ window.nextiva_collector = null;
                 }, 1000);
             });
         } else {
-            // Document already loaded
             setTimeout(() => {
                 console.log('Adding buttons immediately...');
                 collector.addButtons();
