@@ -132,7 +132,7 @@ class NextivaCollector {
 
         // Google Sheets configuration
         this.googleSheetUrl = 'https://docs.google.com/spreadsheets/d/1MzDvA9RT22kLtU-2HT-OqaSy8LwN-ACF_FZfPGgE9zE/edit?gid=956231178#gid=956231178';
-        this.googleScriptUrl = 'https://script.google.com/macros/s/AKfycbycj8DLsNt-6OlAVTJ78iOcThTWhaGUVGdVpY9WNYd--v3pwfEXxrzvu4_VEYyehTW1/exec';
+        this.googleScriptUrl = 'https://script.google.com/macros/s/AKfycbx7dTlg6B9BVr1gplQ0cRjdXlG4lKAiWf-dKvviQ0ZyoO_M7xAXYvOgWEtS__MY9FC4/exec';
 
         // Enhanced call tracking for answered calls
         this.recentCalls = new Map(); // key: phone number, value: array of call objects
