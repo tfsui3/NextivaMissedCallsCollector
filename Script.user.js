@@ -131,7 +131,7 @@ class NextivaCollector {
         this.monitorStartTime = null;
 
         // Google Sheets configuration
-        this.googleSheetUrl = 'https://docs.google.com/spreadsheets/d/1wIOkhZvB9k04zfo-rtFg0AOb7yj2JacUmOpXbL6NsQA/edit?gid=956231178#gid=956231178';
+        this.googleSheetUrl = 'https://docs.google.com/spreadsheets/d/1MzDvA9RT22kLtU-2HT-OqaSy8LwN-ACF_FZfPGgE9zE/edit?gid=956231178#gid=956231178';
         this.googleScriptUrl = 'https://script.google.com/macros/s/AKfycbycj8DLsNt-6OlAVTJ78iOcThTWhaGUVGdVpY9WNYd--v3pwfEXxrzvu4_VEYyehTW1/exec';
 
         // Enhanced call tracking for answered calls
